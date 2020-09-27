@@ -1,9 +1,10 @@
 class PTypes:
-    Char   = 0
-    String = 1
-    Seq    = 2
-    Or     = 3
-    Many   = 4
+    Char    = 0
+    String  = 1
+    And     = 2
+    Or      = 3
+    Many    = 4
+    Closure = 5
 
 class Code(object):
     def __init__(self, code):
@@ -46,7 +47,9 @@ class StringTracker(object):
         return self.code.startswith(expr, self.idx, self.idx + len(expr))
 
     def consume(self, expr):
-        self.idx += len(expr)
+        l = len(expr)
+        self.idx += l
+        self.col += l
 
     def copy(self):
         new = StringTracker(self.code)
@@ -97,7 +100,7 @@ class Parser(object):
         self.__name = ""
         self.__parse_fn = None
         self.__map_fn = lambda x: x
-        self.__type = None
+        self.__type = -1
         self.__include = True
 
     def map(self, map_fn):
@@ -106,6 +109,14 @@ class Parser(object):
 
     def name(self, name):
         self.__name = name
+        return self
+
+    def include(self):
+        self.__include = True
+        return self
+
+    def dont_include(self):
+        self.__include = False
         return self
 
     def __set_params(self, parse, name, fn, p_type, include):
@@ -164,7 +175,50 @@ class Parser(object):
 
         return P
 
+    @staticmethod
+    def Closure(parser, **kwargs):
+        if not isinstance(parser, Parser):
+            raise Exception("The 'Closure' constructor takes an instance of Parser as the argument")
+
+        name, include = Parser._get_params(kwargs)
+
+        P = Parser()
+        P.__set_params(parser, name, Parser.__parse_closure, PTypes.Closure, include)
+
+    def __or__(self, other):
+        if not isinstance(other, Parser):
+            raise Exception(f"Expected an instance of Parser, got {type(other)}")
+
+        if self.__type != PTypes.Or:
+            P = Parser()
+            P.__set_params([self, other], "Anonymous", Parser.__parse_or, PTypes.Or, True)
+            return P
+
+        self.__to_parse.append(other)
+        return self
+
+    def __and__(self, other):
+        if not isinstance(other, Parser):
+            raise Exception(f"Expected an instance of Parser, got {type(other)}")
+
+        if self.__type != PTypes.And:
+            P = Parser()
+            P.__set_params([self, other], "Anonymous", Parser.__parse_and, PTypes.And, True)
+            return P
+
+        self.__to_parse.append(other)
+        return self
+
+    def __eq__(self, other):
+        if not isinstance(other, Parser):
+            raise Exception("Cannot assign a non-parser object to a parser")
+
+        self.__set_params(other.__to_parse, other.__name, other.__parse_fn, other.__type, other.__include)
+
     def parse(self, trckr):
+        if self.__type == -1:
+            raise Exception("Found uninitialized Parser")
+
         return self.__parse_fn(self, trckr)
 
     def __parse_char(self, trckr):
@@ -174,7 +228,7 @@ class Parser(object):
             trckr.consume(self.__to_parse)
             return res.success(self.__map_fn(node))
 
-        return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse}")
+        return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse} ({trckr.lin}:{trckr.col})")
 
     def __parse_string(self, trckr):
         res = ParseResult(self.__include)
@@ -183,7 +237,7 @@ class Parser(object):
             trckr.consume(self.__to_parse)
             return res.success(self.__map_fn(node))
 
-        return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse}")
+        return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse} ({trckr.lin}:{trckr.col})")
 
     def __parse_many(self, trckr):
         res = ParseResult(self.__include)
@@ -200,7 +254,62 @@ class Parser(object):
             p_res = self.__to_parse.parse(trckr)
 
         if not_even_one:
-            return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse.__name}")
+            return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse.__name} ({lin}:{col})")
+
+        return res.success(self.__map_fn(Node(nodes, self.__name, lin, col)) if p_res.include else None)
+
+    def __parse_closure(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        many_res = self.__parse_many(trckr)
+
+        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)) if many_res.include else None)
+
+    def __parse_or(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        down_res = None
+        for parser in self.__to_parse:
+            trck_copy = trckr.copy()
+            p_res = parser.parse(trck_copy)
+
+            if not p_res.error:
+                down_res = p_res
+                trckr.lin = trck_copy.lin
+                trckr.col = trck_copy.col
+                break
+
+        if down_res == None:
+            return res.fail(f"{self.__name} Parsing Error: Expected one of {', '.join([p.__name for p in self.__to_parse])} ({lin}:{col})")
+
+        return res.success(self.__map_fn(Node(down_res.node, self.__name, lin, col)) if down_res.include else None)
+
+    def __parse_and(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        nodes = []
+        trckr_cpy = trckr.copy()
+
+        for parser in self.__to_parse:
+            p_res = parser.parse(trckr_cpy)
+
+            if p_res.error:
+                return res.fail(f"{self.__name} Parsing Error: ({p_res.error_msg}) ({lin}:{col})")
+            
+            if p_res.include:
+                nodes.append(p_res.node)
+
+        trckr.lin = trckr_cpy.lin
+        trckr.col = trckr_cpy.col
 
         return res.success(self.__map_fn(Node(nodes, self.__name, lin, col)))
 
