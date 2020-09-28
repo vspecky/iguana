@@ -5,6 +5,7 @@ class PTypes:
     Or      = 3
     Many    = 4
     Closure = 5
+    Repeat  = 6
 
 class Code(object):
     def __init__(self, code):
@@ -119,6 +120,15 @@ class Parser(object):
         self.__include = False
         return self
 
+    def wrap(self):
+        if self.__type not in [PTypes.And, PTypes.Or]:
+            raise Exception("Only 'And' and 'Or' combinators can be wrapped")
+
+        P = Parser()
+        P.__set_params([self], "Anonymous", self.__parse_fn, self.__type, self.__include)
+
+        return P
+
     def __set_params(self, parse, name, fn, p_type, include):
         self.__to_parse = parse
         self.__name = name
@@ -184,6 +194,26 @@ class Parser(object):
 
         P = Parser()
         P.__set_params(parser, name, Parser.__parse_closure, PTypes.Closure, include)
+
+        return P
+
+    @staticmethod
+    def Repeat(parser, times, **kwargs):
+        if not isinstance(parser, Parser):
+            raise Exception("The 'Repeat' constructor takes an instance of Parser as an argument")
+
+        if not isinstance(times, int):
+            raise Exception("The 'times' argument in the 'Repeat' constructor must be an integer")
+
+        if not times > 0:
+            raise Exception("The 'times' argument in the 'Repeat' constructor must be positive")
+
+        name, include = Parser._get_params(kwargs)
+        P = Parser()
+        P.__set_params(parser, name, Parser.__parse_repeat, PTypes.Repeat, include)
+        P.__amt = times
+
+        return P
 
     def __or__(self, other):
         if not isinstance(other, Parser):
@@ -312,6 +342,19 @@ class Parser(object):
         trckr.col = trckr_cpy.col
 
         return res.success(self.__map_fn(Node(nodes, self.__name, lin, col)))
+
+    def __parse_repeat(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        many_res = self.__parse_many(trckr)
+
+        if len(many_res.node) != self.__amt:
+            return res.fail(f"{self.__name} Parsing Error: Expected exactly {self.__amt} of {self.__to_parse.__name} ({lin}:{col})")
+
+        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)))
 
 def run(parser, code):
     if not isinstance(parser, Parser):
