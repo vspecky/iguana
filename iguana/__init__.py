@@ -1,11 +1,14 @@
 class PTypes:
-    Char    = 0
-    String  = 1
-    And     = 2
-    Or      = 3
-    Many    = 4
-    Closure = 5
-    Repeat  = 6
+    Char     = 0
+    String   = 1
+    And      = 2
+    Or       = 3
+    Many     = 4
+    Closure  = 5
+    Repeat   = 6
+    Range    = 7
+    MoreThan = 8
+    LessThan = 9
 
 class Code(object):
     def __init__(self, code):
@@ -215,6 +218,65 @@ class Parser(object):
 
         return P
 
+    @staticmethod
+    def Range(parser, low, high, **kwargs):
+        if not isinstance(parser, Parser):
+            raise Exception("The 'Range' constructor takes an instance of Parser as an argument")
+
+        if not isinstance(low, int) or not isinstance(high, int):
+            raise Exception("The 'low' and 'high' values in the 'Range' constructor must be integers")
+
+        if high < low:
+            raise Exception("The 'high' argument in the 'Range' constructor must be larger than the 'low' argument")
+
+        name, include = Parser._get_params(kwargs)
+
+        P = Parser()
+        P.__set_params(parser, name, Parser.__parse_range, PTypes.Range, include)
+        P.__low = low
+        P.__high = high
+
+        return P
+
+    @staticmethod
+    def MoreThan(parser, amt, **kwargs):
+        if not isinstance(parser, Parser):
+            raise Exception("The 'MoreThan' constructor takes an instance of Parser as an argument")
+
+        if not isinstance(amt, int):
+            raise Exception("The amount argument in the 'MoreThan' constructor must be an integer")
+
+        if amt < 0:
+            raise Exception("The amount in the 'MoreThan' constructor must be non-negative")
+
+        name, include = Parser._get_params(kwargs)
+
+        P = Parser()
+        P.__set_params(parser, name, Parser.__parse_greater, PTypes.MoreThan, include)
+        P.__amt = amt
+
+        return P
+
+    @staticmethod
+    def LessThan(parser, amt, **kwargs):
+        if not isinstance(parser, Parser):
+            raise Exception("The 'LessThan' constructor takes an instance of Parser as an argument")
+
+        if not isinstance(amt, int):
+            raise Exception("The amount argument in the 'LessThan' constructor must be an integer")
+
+        if amt <= 0:
+            raise Exception("The amount in the 'LessThan' constructor must be positive")
+
+        name, include = Parser._get_params(kwargs)
+
+        P = Parser()
+        P.__set_params(parser, name, Parser.__parse_smaller, PTypes.LessThan, include)
+        P.__amt = amt
+
+        return P
+
+
     def __or__(self, other):
         if not isinstance(other, Parser):
             raise Exception(f"Expected an instance of Parser, got {type(other)}")
@@ -244,6 +306,16 @@ class Parser(object):
             raise Exception("Cannot assign a non-parser object to a parser")
 
         self.__set_params(other.__to_parse, other.__name, other.__parse_fn, other.__type, other.__include)
+
+    def __call__(self, code_string):
+        if not isinstance(code_string, str):
+            raise Exception("Expected code in string format")
+
+        code = Code(code_string)
+        trckr = StringTracker(code)
+
+        return self.__parse_fn(self, trckr)
+
 
     def parse(self, trckr):
         if self.__type == -1:
@@ -279,14 +351,13 @@ class Parser(object):
         p_res = self.__to_parse.parse(trckr)
         not_even_one = p_res.error
         while not p_res.error:
-            if p_res.include:
-                nodes.append(p_res.node)
-            p_res = self.__to_parse.parse(trckr)
+            nodes.append(p_res.node)
+            p_res = self.__to_parse.__parse_fn(self.__to_parse, trckr)
 
         if not_even_one:
             return res.fail(f"{self.__name} Parsing Error: Expected {self.__to_parse.__name} ({lin}:{col})")
 
-        return res.success(self.__map_fn(Node(nodes, self.__name, lin, col)) if p_res.include else None)
+        return res.success(self.__map_fn(Node(nodes, self.__name, lin, col)))
 
     def __parse_closure(self, trckr):
         res = ParseResult(self.__include)
@@ -296,7 +367,7 @@ class Parser(object):
 
         many_res = self.__parse_many(trckr)
 
-        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)) if many_res.include else None)
+        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)))
 
     def __parse_or(self, trckr):
         res = ParseResult(self.__include)
@@ -307,7 +378,7 @@ class Parser(object):
         down_res = None
         for parser in self.__to_parse:
             trck_copy = trckr.copy()
-            p_res = parser.parse(trck_copy)
+            p_res = parser.__parse_fn(parser, trck_copy)
 
             if not p_res.error:
                 down_res = p_res
@@ -318,7 +389,7 @@ class Parser(object):
         if down_res == None:
             return res.fail(f"{self.__name} Parsing Error: Expected one of {', '.join([p.__name for p in self.__to_parse])} ({lin}:{col})")
 
-        return res.success(self.__map_fn(Node(down_res.node, self.__name, lin, col)) if down_res.include else None)
+        return res.success(self.__map_fn(Node(down_res.node, self.__name, lin, col)))
 
     def __parse_and(self, trckr):
         res = ParseResult(self.__include)
@@ -330,13 +401,12 @@ class Parser(object):
         trckr_cpy = trckr.copy()
 
         for parser in self.__to_parse:
-            p_res = parser.parse(trckr_cpy)
+            p_res = parser.__parse_fn(parser, trckr_cpy)
 
             if p_res.error:
                 return res.fail(f"{self.__name} Parsing Error: ({p_res.error_msg}) ({lin}:{col})")
             
-            if p_res.include:
-                nodes.append(p_res.node)
+            nodes.append(p_res.node)
 
         trckr.lin = trckr_cpy.lin
         trckr.col = trckr_cpy.col
@@ -353,6 +423,46 @@ class Parser(object):
 
         if len(many_res.node) != self.__amt:
             return res.fail(f"{self.__name} Parsing Error: Expected exactly {self.__amt} of {self.__to_parse.__name} ({lin}:{col})")
+
+        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)))
+
+    def __parse_range(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        many_res = self.__parse_many(trckr)
+
+        l = len(many_res.node)
+        if l > self.__high or l < self.__low:
+            return res.fail(f"{self.__name} Parsing Error: Expected {self.__low}-{self.__high} of {self.__to_parse.__name}")
+
+        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)))
+
+    def __parse_greater(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        many_res = self.__parse_many(trckr)
+
+        if len(many_res.node) <= self.__amt:
+            return res.fail(f"{self.__name} Parsing Error: Expected more than {self.__amt} of {self.__to_parse.__name} ({lin}:{col})")
+
+        return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)))
+
+    def __parse_smaller(self, trckr):
+        res = ParseResult(self.__include)
+
+        lin = trckr.lin
+        col = trckr.col
+
+        many_res = self.__parse_many(trckr)
+
+        if len(many_res.node) >= self.__amt:
+            return res.fail(f"{self.__name} Parsing Error: Expected less than {self.__amt} of {self.__to_parse.__name} ({lin}:{col})")
 
         return res.success(self.__map_fn(Node(many_res.node, self.__name, lin, col)))
 
